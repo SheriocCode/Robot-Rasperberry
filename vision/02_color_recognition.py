@@ -1,205 +1,255 @@
-import sys
 import cv2
-import time
-import math
 import numpy as np
+import sys
 
-rect = None
-size = (320, 240)
-rotation_angle = 0
-unreachable = False
-world_X, world_Y = 0, 0
+# 颜色定义
+COLORS = {
+    'red': {'hsv_min': (0, 120, 70), 'hsv_max': (10, 255, 255), 'rgb': (0, 0, 255)},
+    'green': {'hsv_min': (35, 120, 70), 'hsv_max': (85, 255, 255), 'rgb': (0, 255, 0)},
+    'blue': {'hsv_min': (100, 120, 70), 'hsv_max': (130, 255, 255), 'rgb': (255, 0, 0)},
+    'yellow': {'hsv_min': (20, 120, 70), 'hsv_max': (30, 255, 255), 'rgb': (0, 255, 255)},
+    'purple': {'hsv_min': (130, 120, 70), 'hsv_max': (160, 255, 255), 'rgb': (255, 0, 255)}
+}
 
-if sys.version_info.major == 2:
-    print('Please run this program with python3!')
-    sys.exit(0)
+# 全局变量
+selected_color = 'red'
+detection_enabled = False
+show_mask = False
+use_roi = False
+roi = None
+contour_area_threshold = 5000  # 最小轮廓面积阈值
+detection_history = []
+history_size = 5  # 用于平滑检测结果的历史记录大小
+
+# 创建窗口和滑动条
+def create_trackbars():
+    cv2.namedWindow('Trackbars')
     
-
-  
-# 设置检测的目标颜色
-__target_color = ('red', 'green', 'blue')
-
-#目标颜色阈值
-range_rgb = {
-    'red': (0, 0, 255),
-    'blue': (255, 0, 0),
-    'green': (0, 255, 0),
-    'black': (0, 0, 0),
-    'white': (255, 255, 255)}
-
-# 颜色阈值
-lab_data_max = {'red':  (255, 255, 255), 'black': ( 89, 255, 255), 'blue': ( 255, 254, 90), 'green': ( 255, 120, 180), 'white': ( 255, 255, 255)}
-lab_data_min = {'red':  (0, 160, 135), 'black': ( 0, 0, 0), 'blue': ( 0, 120, 0), 'green': ( 0, 0, 100), 'white': ( 193, 0, 0)}
-
-count = 0
-_stop = False
-color_list = []
-get_roi = False
-__isRunning = False
-move_square = False
-detect_color = 'None'
-start_pick_up = False
-
-# 变量重置
-def reset(): 
-    global _stop
-    global count
-    global get_roi
-    global color_list
-    global move_square
-    global detect_color
-    global start_pick_up
+    # 为每个颜色创建滑动条
+    for color in COLORS:
+        cv2.createTrackbar(f'{color}_h_min', 'Trackbars', COLORS[color]['hsv_min'][0], 179, lambda x: None)
+        cv2.createTrackbar(f'{color}_s_min', 'Trackbars', COLORS[color]['hsv_min'][1], 255, lambda x: None)
+        cv2.createTrackbar(f'{color}_v_min', 'Trackbars', COLORS[color]['hsv_min'][2], 255, lambda x: None)
+        cv2.createTrackbar(f'{color}_h_max', 'Trackbars', COLORS[color]['hsv_max'][0], 179, lambda x: None)
+        cv2.createTrackbar(f'{color}_s_max', 'Trackbars', COLORS[color]['hsv_max'][1], 255, lambda x: None)
+        cv2.createTrackbar(f'{color}_v_max', 'Trackbars', COLORS[color]['hsv_max'][2], 255, lambda x: None)
     
-    count = 0
-    _stop = False
-    color_list = []
-    get_roi = False
-    move_square = False
-    detect_color = 'None'
-    start_pick_up = False
-
-# 开启玩法
-def start():
-    global __isRunning
-    reset()
-    __isRunning = True
-    print("ColorDetect Start")
-
-
-# 找出面积最大的轮廓
-# 参数为要比较的轮廓的列表
-def getAreaMaxContour(contours):
-    contour_area_temp = 0
-    contour_area_max = 0
-    area_max_contour = None
-
-    for c in contours:  # 历遍所有轮廓
-        contour_area_temp = math.fabs(cv2.contourArea(c))  # 计算轮廓面积
-        if contour_area_temp > contour_area_max:
-            contour_area_max = contour_area_temp
-            if contour_area_temp > 300:  # 只有在面积大于300时，最大面积的轮廓才是有效的，以过滤干扰
-                area_max_contour = c
-
-    return area_max_contour, contour_area_max  # 返回最大的轮廓
-
-#坐标转换
-def map(x, in_min, in_max, out_min, out_max):
-    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
-
-
-t1 = 0
-roi = ()
-center_list = []
-last_x, last_y = 0, 0
-draw_color = range_rgb["black"]
-# 图像处理
-def run(img):
-    global roi
-    global rect
-    global count
-    global get_roi
-    global move_square
-    global center_list
-    global unreachable
-    global __isRunning
-    global start_pick_up
-    global last_x, last_y
-    global rotation_angle
-    global world_X, world_Y
-    global start_count_t1, t1
-    global detect_color, draw_color, color_list
+    # 面积阈值滑动条
+    cv2.createTrackbar('Area Threshold', 'Trackbars', contour_area_threshold, 50000, lambda x: None)
     
-    if not __isRunning:
-        return img
+    # 颜色选择下拉菜单
+    cv2.createTrackbar('Color Select', 'Trackbars', 0, len(COLORS)-1, on_color_select)
+
+# 颜色选择回调函数
+def on_color_select(val):
+    global selected_color
+    selected_color = list(COLORS.keys())[val]
+
+# 鼠标回调函数，用于选择ROI
+def select_roi(event, x, y, flags, param):
+    global roi, use_roi
+    
+    if event == cv2.EVENT_LBUTTONDOWN:
+        roi = (x, y)
+        use_roi = True
+    elif event == cv2.EVENT_LBUTTONUP and use_roi:
+        roi = (roi[0], roi[1], x, y)
+        use_roi = False
+
+# 从滑动条获取当前颜色的HSV阈值
+def get_current_color_thresholds():
+    h_min = cv2.getTrackbarPos(f'{selected_color}_h_min', 'Trackbars')
+    s_min = cv2.getTrackbarPos(f'{selected_color}_s_min', 'Trackbars')
+    v_min = cv2.getTrackbarPos(f'{selected_color}_v_min', 'Trackbars')
+    h_max = cv2.getTrackbarPos(f'{selected_color}_h_max', 'Trackbars')
+    s_max = cv2.getTrackbarPos(f'{selected_color}_s_max', 'Trackbars')
+    v_max = cv2.getTrackbarPos(f'{selected_color}_v_max', 'Trackbars')
+    
+    return (h_min, s_min, v_min), (h_max, s_max, v_max)
+
+# 处理红色的特殊情况（在HSV空间中跨越0度）
+def create_red_mask(hsv_image, h_min, s_min, v_min, h_max, s_max, v_max):
+    if h_min > h_max:  # 红色跨越0度
+        lower_red1 = np.array([h_min, s_min, v_min])
+        upper_red1 = np.array([179, s_max, v_max])
+        mask1 = cv2.inRange(hsv_image, lower_red1, upper_red1)
+        
+        lower_red2 = np.array([0, s_min, v_min])
+        upper_red2 = np.array([h_max, s_max, v_max])
+        mask2 = cv2.inRange(hsv_image, lower_red2, upper_red2)
+        
+        return cv2.bitwise_or(mask1, mask2)
     else:
-        img_copy = img.copy()
-        img_h, img_w = img.shape[:2]
+        lower_red = np.array([h_min, s_min, v_min])
+        upper_red = np.array([h_max, s_max, v_max])
+        return cv2.inRange(hsv_image, lower_red, upper_red)
 
-        frame_resize = cv2.resize(img_copy, size, interpolation=cv2.INTER_NEAREST)#图像缩放
-        frame_gb = cv2.GaussianBlur(frame_resize, (3, 3), 3)#高斯滤波
+# 主处理函数
+def process_frame(frame):
+    global detection_enabled, show_mask, roi, contour_area_threshold, detection_history
+    
+    # 获取当前面积阈值
+    contour_area_threshold = cv2.getTrackbarPos('Area Threshold', 'Trackbars')
+    
+    # 复制原始帧用于显示
+    output_frame = frame.copy()
+    
+    # 转换为HSV色彩空间
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    
+    # 如果选择了ROI，只处理ROI区域
+    if roi and len(roi) == 4:
+        x1, y1, x2, y2 = roi
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
         
-        frame_lab = cv2.cvtColor(frame_gb, cv2.COLOR_BGR2LAB)  # 将图像转换到LAB空间
-
-        color_area_max = None
-        max_area = 0
-        areaMaxContour_max = 0
-        if not start_pick_up:
-            for i in lab_data_max:
-                if i in __target_color:
-                    frame_mask = cv2.inRange(frame_lab,
-                                                   (lab_data_min[i][0],
-                                                  lab_data_min[i][1],
-                                                  lab_data_min[i][2]),
-                                                 (lab_data_max[i][0],
-                                                  lab_data_max[i][1],
-                                                  lab_data_max[i][2]))          #对原图像和掩模进行位运算，二值化
-                    opened = cv2.morphologyEx(frame_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))  # 开运算
-                    closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))  # 闭运算
-                    contours = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[-2]  # 找出轮廓
-                    areaMaxContour, area_max = getAreaMaxContour(contours)  # 找出最大轮廓
-                    if areaMaxContour is not None:
-                        if area_max > max_area:  # 找最大面积
-                            max_area = area_max
-                            color_area_max = i
-                            areaMaxContour_max = areaMaxContour
-            if max_area > 500:  # 有找到面积大于500的轮廓
-                (center_x, center_y), radius = cv2.minEnclosingCircle(areaMaxContour_max)  # 获取最小外接圆
-                center_x = int(map(center_x, 0, size[0], 0, img_w)) #圆心x坐标
-                center_y = int(map(center_y, 0, size[1], 0, img_h)) #圆心y坐标
-                radius = int(map(radius, 0, size[0], 0, img_w))  #半径
-                cv2.circle(img, (int(center_x), int(center_y)), int(radius), range_rgb[color_area_max], 2) #画出最小外接圆
-                
-                if not start_pick_up:
-                    if color_area_max == 'red':  # 红色最大
-                        color = 1
-                    elif color_area_max == 'green':  # 绿色最大
-                        color = 2
-                    elif color_area_max == 'blue':  # 蓝色最大
-                        color = 3
-                    else:
-                        color = 0
-                    color_list.append(color)
-                    if len(color_list) == 3:  # 多次判断
-                        # 取平均值
-                        color = int(round(np.mean(np.array(color_list))))
-                        color_list = []
-                        start_pick_up = True
-                        if color == 1:
-                            detect_color = 'red'
-                            draw_color = range_rgb["red"]
-                        elif color == 2:
-                            detect_color = 'green'
-                            draw_color = range_rgb["green"]
-                        elif color == 3:
-                            detect_color = 'blue'
-                            draw_color = range_rgb["blue"]
-                        else:
-                            detect_color = 'None'
-                            draw_color = range_rgb["black"]
-            else:
-                if not start_pick_up:
-                    draw_color = (0, 0, 0)
-                    detect_color = "None"  
+        # 在输出帧上绘制ROI
+        cv2.rectangle(output_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         
-        cv2.putText(img, "Color: " + detect_color, (10, img.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.65, draw_color, 2)  #在回传画面打印下识别信息
-        
-        return img
-
-if __name__ == '__main__':
-    start()
-    cap = cv2.VideoCapture(0)     #开启摄像头
-    while True:
-        # 移除了这一行，不再每次循环都重置start_pick_up
-        # start_pick_up = False
-        ret, img = cap.read()       #读取一帧摄像头图像，ret为布尔值。
-        if ret:
-            frame = img.copy() 
-            Frame = run(frame)      
-            frame_resize = cv2.resize(Frame, (320, 240))     
-            cv2.imshow('frame', frame_resize)              #显示回传画面
-            key = cv2.waitKey(1)
-            if key == 27:  # ESC键退出
-                break
+        # 处理ROI区域
+        roi_hsv = hsv[y1:y2, x1:x2]
+    else:
+        roi_hsv = hsv
+    
+    # 获取当前颜色的阈值
+    hsv_min, hsv_max = get_current_color_thresholds()
+    
+    # 创建颜色掩码
+    if selected_color == 'red':
+        mask = create_red_mask(roi_hsv, *hsv_min, *hsv_max)
+    else:
+        mask = cv2.inRange(roi_hsv, np.array(hsv_min), np.array(hsv_max))
+    
+    # 应用形态学操作减少噪点
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    
+    # 查找轮廓
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # 找出最大轮廓
+    max_contour = None
+    max_area = 0
+    
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area > max_area and area > contour_area_threshold:
+            max_area = area
+            max_contour = contour
+    
+    # 显示掩码（如果启用）
+    if show_mask:
+        if roi and len(roi) == 4:
+            x1, y1, x2, y2 = roi
+            output_frame[y1:y2, x1:x2] = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
         else:
-            time.sleep(0.01)
+            output_frame = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    
+    # 如果找到有效轮廓，绘制并标记
+    if max_contour is not None:
+        # 计算轮廓的中心
+        M = cv2.moments(max_contour)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            
+            # 如果使用ROI，调整坐标
+            if roi and len(roi) == 4:
+                cx += roi[0]
+                cy += roi[1]
+                max_contour = max_contour + np.array([[roi[0], roi[1]]])
+            
+            # 绘制轮廓和中心点
+            cv2.drawContours(output_frame, [max_contour], -1, COLORS[selected_color]['rgb'], 2)
+            cv2.circle(output_frame, (cx, cy), 5, COLORS[selected_color]['rgb'], -1)
+            
+            # 添加颜色标签
+            cv2.putText(output_frame, f"{selected_color.upper()}", (cx, cy - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLORS[selected_color]['rgb'], 2)
+            
+            # 存储检测结果用于平滑处理
+            detection_history.append(selected_color)
+            if len(detection_history) > history_size:
+                detection_history.pop(0)
+            
+            # 计算检测历史中出现最多的颜色
+            if detection_enabled:
+                from collections import Counter
+                if len(detection_history) > 0:
+                    most_common_color = Counter(detection_history).most_common(1)[0][0]
+                    cv2.putText(output_frame, f"Detected: {most_common_color.upper()}", (10, 30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLORS[most_common_color]['rgb'], 2)
+    
+    # 显示当前选择的颜色
+    cv2.putText(output_frame, f"Selected: {selected_color.upper()}", (10, 60), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLORS[selected_color]['rgb'], 2)
+    
+    # 显示控制信息
+    cv2.putText(output_frame, "Press 'd' to toggle detection, 'm' to show mask, 'r' to reset ROI", 
+                (10, output_frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    
+    return output_frame
+
+def main():
+    global detection_enabled, show_mask, roi, selected_color
+    
+    # 检查Python版本
+    if sys.version_info.major == 2:
+        print('Please run this program with python3!')
+        sys.exit(0)
+    
+    # 打开摄像头
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("无法打开摄像头")
+        sys.exit(0)
+    
+    # 创建显示窗口
+    cv2.namedWindow('Color Detection')  # 确保窗口存在后再设置回调
+    
+    # 设置鼠标回调
+    cv2.setMouseCallback('Color Detection', select_roi)
+    
+    # 创建滑动条
+    create_trackbars()
+    
+    print("颜色识别程序已启动")
+    print("按 'd' 键切换检测模式")
+    print("按 'm' 键显示/隐藏掩码")
+    print("按 'r' 键重置ROI")
+    print("按 'q' 键退出程序")
+    
+    while True:
+        # 读取一帧
+        ret, frame = cap.read()
+        if not ret:
+            print("无法获取摄像头图像")
+            break
+        
+        # 处理帧
+        processed_frame = process_frame(frame)
+        
+        # 显示结果
+        cv2.imshow('Color Detection', processed_frame)
+        
+        # 处理按键
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):  # 退出程序
+            break
+        elif key == ord('d'):  # 切换检测模式
+            detection_enabled = not detection_enabled
+            print(f"检测模式: {'开启' if detection_enabled else '关闭'}")
+        elif key == ord('m'):  # 显示/隐藏掩码
+            show_mask = not show_mask
+            print(f"掩码显示: {'开启' if show_mask else '关闭'}")
+        elif key == ord('r'):  # 重置ROI
+            roi = None
+            print("ROI已重置")
+    
+    # 释放资源
+    cap.release()
     cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
